@@ -1,134 +1,251 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
+import { parse as parseYaml } from "yaml";
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface FrontmatterSyncSettings {
+	syncTags: string[];
+	ignoreTags: string[];
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
-}
+const DEFAULT_SETTINGS: FrontmatterSyncSettings = {
+	syncTags: [],
+	ignoreTags: [],
+};
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class FrontmatterSyncPlugin extends Plugin {
+	settings: FrontmatterSyncSettings;
+	private timeout: NodeJS.Timeout | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+		this.registerEvent(
+			this.app.vault.on("modify", (file: TFile) => {
+				if (file.extension === "md") {
+					this.debounceSyncFrontmatter(file);
 				}
-			}
-		});
+			})
+		);
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
+		this.addSettingTab(new FrontmatterSyncSettingTab(this.app, this));
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
+
+	debounceSyncFrontmatter(file: TFile) {
+		if (this.timeout) {
+			clearTimeout(this.timeout);
+		}
+		this.timeout = setTimeout(() => {
+			this.syncFrontmatter(file);
+		}, 2000);
+	}
+
+	async syncFrontmatter(file: TFile) {
+		const content = await this.app.vault.read(file);
+		const frontmatter = this.parseFrontmatter(content);
+
+		if (!frontmatter) {
+			return;
+		}
+
+		const updatedFrontmatter = this.synchronizeProperties(frontmatter);
+
+		if (
+			JSON.stringify(frontmatter) !== JSON.stringify(updatedFrontmatter)
+		) {
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				Object.keys(updatedFrontmatter).forEach((key) => {
+					fm[key] = updatedFrontmatter[key];
+				});
+				Object.keys(fm).forEach((key) => {
+					if (!(key in updatedFrontmatter)) {
+						delete fm[key];
+					}
+				});
+			});
+		}
+	}
+
+	parseFrontmatter(content: string): any {
+		const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+		if (fmMatch) {
+			try {
+				return parseYaml(fmMatch[1]);
+			} catch (e) {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	synchronizeProperties(frontmatter: any): any {
+		const updatedFrontmatter = { ...frontmatter };
+		let tags = new Set<string>(updatedFrontmatter.tags || []);
+
+		const hasIgnoredTag = Array.from(tags).some((tag) =>
+			this.settings.ignoreTags.some((ignoreTag) =>
+				tag.startsWith(ignoreTag)
+			)
+		);
+		if (hasIgnoredTag) {
+			return updatedFrontmatter;
+		}
+
+		const hasRequiredTag = Array.from(tags).some((tag) =>
+			this.settings.syncTags.some((syncTag) => tag.startsWith(syncTag))
+		);
+
+		if (!hasRequiredTag) {
+			return updatedFrontmatter;
+		}
+
+		const hasCategoryProperty = "category" in updatedFrontmatter;
+
+		const extractCategoryName = (cat: string): string => {
+			if (!cat) return "";
+			cat = cat.replace(/^\[\[|\]\]$/g, "");
+			const parts = cat.split("/");
+			let lastPart = parts[parts.length - 1];
+			lastPart = lastPart.split("|")[0];
+			lastPart = lastPart.replace(/\.md$/, "");
+			return lastPart.trim();
+		};
+
+		const originalCategories = hasCategoryProperty
+			? updatedFrontmatter.category
+			: undefined;
+
+		const categories = new Set<string>(
+			Array.isArray(originalCategories)
+				? originalCategories.map(extractCategoryName).filter(Boolean)
+				: originalCategories
+				? [extractCategoryName(originalCategories)]
+				: []
+		);
+
+		if (categories.size > 0) {
+			tags = new Set(
+				Array.from(tags).filter((tag) => !tag.startsWith("category/"))
+			);
+
+			for (const category of categories) {
+				const tagCategory = category.replace(/\s+/g, "_");
+				tags.add(`category/${tagCategory}`);
+			}
+		} else {
+			tags = new Set(
+				Array.from(tags).filter((tag) => !tag.startsWith("category/"))
+			);
+		}
+
+		if (tags.size > 0) {
+			updatedFrontmatter.tags = Array.from(tags);
+		} else {
+			delete updatedFrontmatter.tags;
+		}
+
+		if (hasCategoryProperty) {
+			updatedFrontmatter.category = originalCategories;
+		}
+
+		return updatedFrontmatter;
+	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class FrontmatterSyncSettingTab extends PluginSettingTab {
+	plugin: FrontmatterSyncPlugin;
+	private tagInput: HTMLInputElement;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: FrontmatterSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
+		const { containerEl } = this;
 
 		containerEl.empty();
 
+		containerEl.createEl("h2", { text: "Frontmatter Sync" });
+
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+			.setName("Add Sync Tag")
+			.setDesc("Enter a tag to add to the sync list")
+			.addText((text) => {
+				this.tagInput = text.inputEl;
+				text.setPlaceholder("Enter tag");
+			})
+			.addButton((button) =>
+				button.setButtonText("Add").onClick(async () => {
+					const newTag = this.tagInput.value.trim();
+					if (
+						newTag &&
+						!this.plugin.settings.syncTags.includes(newTag)
+					) {
+						this.plugin.settings.syncTags.push(newTag);
+						await this.plugin.saveSettings();
+						this.tagInput.value = "";
+						this.display();
+					}
+				})
+			);
+
+		containerEl.createEl("h3", { text: "Current Sync Tags" });
+
+		this.plugin.settings.syncTags.forEach((tag, index) => {
+			new Setting(containerEl).setName(tag).addButton((button) =>
+				button.setButtonText("Remove").onClick(async () => {
+					this.plugin.settings.syncTags.splice(index, 1);
 					await this.plugin.saveSettings();
-				}));
+					this.display();
+				})
+			);
+		});
+
+		containerEl.createEl("h2", { text: "Ignore Tags" });
+
+		new Setting(containerEl)
+			.setName("Add Ignore Tag")
+			.setDesc("Enter a tag to add to the ignore list")
+			.addText((text) => {
+				this.tagInput = text.inputEl;
+				text.setPlaceholder("Enter tag");
+			})
+			.addButton((button) =>
+				button.setButtonText("Add").onClick(async () => {
+					const newTag = this.tagInput.value.trim();
+					if (
+						newTag &&
+						!this.plugin.settings.ignoreTags.includes(newTag)
+					) {
+						this.plugin.settings.ignoreTags.push(newTag);
+						await this.plugin.saveSettings();
+						this.tagInput.value = "";
+						this.display();
+					}
+				})
+			);
+
+		containerEl.createEl("h3", { text: "Current Ignore Tags" });
+
+		this.plugin.settings.ignoreTags.forEach((tag, index) => {
+			new Setting(containerEl).setName(tag).addButton((button) =>
+				button.setButtonText("Remove").onClick(async () => {
+					this.plugin.settings.ignoreTags.splice(index, 1);
+					await this.plugin.saveSettings();
+					this.display();
+				})
+			);
+		});
 	}
 }
