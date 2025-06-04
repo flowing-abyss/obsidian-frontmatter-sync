@@ -241,11 +241,13 @@ export default class FrontmatterSyncPlugin extends Plugin {
 
 			for (const file of markdownFiles) {
 				try {
-					processedCount++;
 					const content = await this.app.vault.read(file);
 					const frontmatter = this.parseFrontmatter(content);
 
-					if (!frontmatter || !frontmatter.tags) continue;
+					// Skip files without frontmatter or tags
+					if (!frontmatter || !frontmatter.tags) {
+						continue;
+					}
 
 					// Check if file has any of the sync tags
 					const hasSyncTag = frontmatter.tags.some((tag: string) =>
@@ -254,9 +256,13 @@ export default class FrontmatterSyncPlugin extends Plugin {
 						)
 					);
 
-					// Skip files without sync tags
-					if (!hasSyncTag) continue;
+					// Skip files without sync tags without making any changes
+					if (!hasSyncTag) {
+						continue;
+					}
 
+					// Only process files that have sync tags
+					processedCount++;
 					const updatedTags = this.synchronizeProperties(frontmatter);
 
 					if (
