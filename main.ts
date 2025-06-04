@@ -94,7 +94,18 @@ export default class FrontmatterSyncPlugin extends Plugin {
 		const content = await this.app.vault.read(file);
 		const frontmatter = this.parseFrontmatter(content);
 
-		if (!frontmatter) {
+		// Skip files without frontmatter or tags
+		if (!frontmatter || !frontmatter.tags) {
+			return;
+		}
+
+		// Check if file has any of the sync tags
+		const hasSyncTag = frontmatter.tags.some((tag: string) =>
+			this.settings.syncTags.some((syncTag) => tag.startsWith(syncTag))
+		);
+
+		// Skip files without sync tags without making any changes
+		if (!hasSyncTag) {
 			return;
 		}
 
