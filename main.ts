@@ -1,4 +1,11 @@
-import { App, Plugin, PluginSettingTab, Setting, TFile } from "obsidian";
+import {
+	App,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	TFile,
+} from "obsidian";
 import { parse as parseYaml } from "yaml";
 
 interface ValueMapping {
@@ -52,6 +59,13 @@ export default class FrontmatterSyncPlugin extends Plugin {
 			})
 		);
 
+		// Add command for bulk synchronization
+		this.addCommand({
+			id: "sync-all-frontmatter",
+			name: "Sync all frontmatter",
+			callback: () => this.syncAllFrontmatter(),
+		});
+
 		this.addSettingTab(new FrontmatterSyncSettingTab(this.app, this));
 	}
 
@@ -84,20 +98,11 @@ export default class FrontmatterSyncPlugin extends Plugin {
 			return;
 		}
 
-		const updatedFrontmatter = this.synchronizeProperties(frontmatter);
+		const updatedTags = this.synchronizeProperties(frontmatter);
 
-		if (
-			JSON.stringify(frontmatter) !== JSON.stringify(updatedFrontmatter)
-		) {
+		if (JSON.stringify(frontmatter.tags) !== JSON.stringify(updatedTags)) {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				Object.keys(updatedFrontmatter).forEach((key) => {
-					fm[key] = updatedFrontmatter[key];
-				});
-				Object.keys(fm).forEach((key) => {
-					if (!(key in updatedFrontmatter)) {
-						delete fm[key];
-					}
-				});
+				fm.tags = updatedTags;
 			});
 		}
 	}
@@ -114,9 +119,8 @@ export default class FrontmatterSyncPlugin extends Plugin {
 		return null;
 	}
 
-	synchronizeProperties(frontmatter: any): any {
-		const updatedFrontmatter = { ...frontmatter };
-		let tags = new Set<string>(updatedFrontmatter.tags || []);
+	synchronizeProperties(frontmatter: any): string[] {
+		let tags = new Set<string>(frontmatter.tags || []);
 
 		// Check for ignore tags
 		const hasIgnoredTag = Array.from(tags).some((tag) =>
@@ -125,7 +129,7 @@ export default class FrontmatterSyncPlugin extends Plugin {
 			)
 		);
 		if (hasIgnoredTag) {
-			return updatedFrontmatter;
+			return Array.from(tags);
 		}
 
 		// Check for sync tags
@@ -133,13 +137,12 @@ export default class FrontmatterSyncPlugin extends Plugin {
 			this.settings.syncTags.some((syncTag) => tag.startsWith(syncTag))
 		);
 		if (!hasSyncTag) {
-			return updatedFrontmatter;
+			return Array.from(tags);
 		}
 
 		// Process each property configuration
 		for (const config of this.settings.propertyConfigs) {
-			const propertyValue = updatedFrontmatter[config.propertyName];
-			if (!propertyValue) continue;
+			const propertyValue = frontmatter[config.propertyName];
 
 			// Remove existing tags for this property
 			if (config.syncType === "wikilink") {
@@ -201,28 +204,89 @@ export default class FrontmatterSyncPlugin extends Plugin {
 					}
 				}
 			} else if (config.syncType === "direct") {
-				const values = Array.isArray(propertyValue)
-					? propertyValue
-					: [propertyValue];
-				for (const value of values) {
-					if (value !== null && value !== undefined) {
-						tags.add(sanitizeTagValue(value));
+				// Only add new tag if property has a value
+				if (
+					propertyValue !== null &&
+					propertyValue !== undefined &&
+					propertyValue !== ""
+				) {
+					const values = Array.isArray(propertyValue)
+						? propertyValue
+						: [propertyValue];
+					for (const value of values) {
+						if (
+							value !== null &&
+							value !== undefined &&
+							value !== ""
+						) {
+							tags.add(sanitizeTagValue(value));
+						}
 					}
 				}
-				// Store the current value for next sync
+				// Always update lastSyncedValue
 				config.lastSyncedValue = propertyValue;
 			}
 		}
 
-		if (tags.size > 0) {
-			updatedFrontmatter.tags = Array.from(tags).sort((a, b) =>
-				b.localeCompare(a)
-			);
-		} else {
-			delete updatedFrontmatter.tags;
-		}
+		return tags.size > 0
+			? Array.from(tags).sort((a, b) => b.localeCompare(a))
+			: [];
+	}
 
-		return updatedFrontmatter;
+	async syncAllFrontmatter() {
+		try {
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			let processedCount = 0;
+			let updatedCount = 0;
+
+			for (const file of markdownFiles) {
+				try {
+					processedCount++;
+					const content = await this.app.vault.read(file);
+					const frontmatter = this.parseFrontmatter(content);
+
+					if (!frontmatter || !frontmatter.tags) continue;
+
+					// Check if file has any of the sync tags
+					const hasSyncTag = frontmatter.tags.some((tag: string) =>
+						this.settings.syncTags.some((syncTag) =>
+							tag.startsWith(syncTag)
+						)
+					);
+
+					// Skip files without sync tags
+					if (!hasSyncTag) continue;
+
+					const updatedTags = this.synchronizeProperties(frontmatter);
+
+					if (
+						JSON.stringify(frontmatter.tags) !==
+						JSON.stringify(updatedTags)
+					) {
+						await this.app.fileManager.processFrontMatter(
+							file,
+							(fm) => {
+								fm.tags = updatedTags;
+							}
+						);
+						updatedCount++;
+					}
+				} catch (fileError) {
+					console.error(
+						`Error processing file ${file.path}:`,
+						fileError
+					);
+				}
+			}
+
+			// Show notification with results
+			new Notice(
+				`Processed ${processedCount} files, updated ${updatedCount} files.`
+			);
+		} catch (error) {
+			console.error("Error during bulk sync:", error);
+			new Notice("Error during bulk sync. Check console for details.");
+		}
 	}
 }
 
