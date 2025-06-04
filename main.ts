@@ -11,6 +11,7 @@ interface PropertySyncConfig {
 	syncType: "value" | "wikilink" | "direct";
 	valueMappings?: ValueMapping[];
 	tagPrefix?: string;
+	lastSyncedValue?: any; // Track the last value that was synced
 }
 
 interface FrontmatterSyncSettings {
@@ -158,13 +159,12 @@ export default class FrontmatterSyncPlugin extends Plugin {
 					)
 				);
 			} else if (config.syncType === "direct") {
-				const values = Array.isArray(propertyValue)
-					? propertyValue
-					: [propertyValue];
-				for (const value of values) {
-					if (value !== null && value !== undefined) {
-						tags.add(sanitizeTagValue(value));
-					}
+				// For direct sync, remove the tag that was created from the last synced value
+				if (config.lastSyncedValue !== undefined) {
+					const lastTag = sanitizeTagValue(config.lastSyncedValue);
+					tags = new Set(
+						Array.from(tags).filter((tag) => tag !== lastTag)
+					);
 				}
 			}
 
@@ -200,6 +200,17 @@ export default class FrontmatterSyncPlugin extends Plugin {
 						tags.add(sanitizeTagValue(mapping.tagValue));
 					}
 				}
+			} else if (config.syncType === "direct") {
+				const values = Array.isArray(propertyValue)
+					? propertyValue
+					: [propertyValue];
+				for (const value of values) {
+					if (value !== null && value !== undefined) {
+						tags.add(sanitizeTagValue(value));
+					}
+				}
+				// Store the current value for next sync
+				config.lastSyncedValue = propertyValue;
 			}
 		}
 
