@@ -1,2 +1,2 @@
 
-Synchronizes tags and category properties in Obsidian notes.
+Automatically synchronizes properties with tags in Obsidian notes.
