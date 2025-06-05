@@ -3,7 +3,7 @@
 	"name": "Frontmatter Sync",
 	"version": "0.2.2",
 	"minAppVersion": "0.15.0",
-	"description": "Synchronizes tags and category properties in Obsidian notes",
+	"description": "Automatically synchronizes properties with tags",
 	"author": "flowing-abyss",
 	"authorUrl": "https://github.com/flowing-abyss",
 	"fundingUrl": "https://www.donationalerts.com/r/flowing_abyss",
