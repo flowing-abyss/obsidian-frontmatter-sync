@@ -1,7 +1,7 @@
 {
 	"id": "obsidian-frontmatter-sync",
 	"name": "Frontmatter Sync",
-	"version": "0.2.2",
+	"version": "0.2.3",
 	"minAppVersion": "0.15.0",
 	"description": "Automatically synchronizes properties with tags",
 	"author": "flowing-abyss",

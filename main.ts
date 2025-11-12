@@ -40,7 +40,7 @@ function sanitizeTagValue(value: any): string {
 	// Split by forward slash to preserve hierarchy
 	return stringValue
 		.split("/")
-		.map((part) => part.replace(/[^a-zA-Z0-9_]/g, "_"))
+		.map((part) => part.replace(/[^\p{L}\p{N}_-]/gu, "_"))
 		.join("/");
 }
 
