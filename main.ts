@@ -111,7 +111,12 @@ export default class FrontmatterSyncPlugin extends Plugin {
 
 		const updatedTags = this.synchronizeProperties(frontmatter);
 
-		if (JSON.stringify(frontmatter.tags) !== JSON.stringify(updatedTags)) {
+		const originalSet = new Set<string>(frontmatter.tags);
+		const tagsChanged =
+			originalSet.size !== updatedTags.length ||
+			updatedTags.some((tag) => !originalSet.has(tag));
+
+		if (tagsChanged) {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
 				fm.tags = updatedTags;
 			});
@@ -276,10 +281,12 @@ export default class FrontmatterSyncPlugin extends Plugin {
 					processedCount++;
 					const updatedTags = this.synchronizeProperties(frontmatter);
 
-					if (
-						JSON.stringify(frontmatter.tags) !==
-						JSON.stringify(updatedTags)
-					) {
+					const originalSet = new Set<string>(frontmatter.tags);
+					const tagsChanged =
+						originalSet.size !== updatedTags.length ||
+						updatedTags.some((tag) => !originalSet.has(tag));
+
+					if (tagsChanged) {
 						await this.app.fileManager.processFrontMatter(
 							file,
 							(fm) => {
