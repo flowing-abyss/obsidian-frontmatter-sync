@@ -179,6 +179,11 @@ export default class FrontmatterSyncPlugin extends Plugin {
 			return Array.from(tags);
 		}
 
+		// Tags produced in this pass (by any config) and those produced by value mappings,
+		// used below to replace stale tags left in a namespace after mappings were edited
+		const producedTags = new Set<string>();
+		const mappedTags = new Set<string>();
+
 		// Process each property configuration
 		for (const config of this.settings.propertyConfigs) {
 			const propertyValue = frontmatter[config.propertyName];
@@ -228,7 +233,9 @@ export default class FrontmatterSyncPlugin extends Plugin {
 
 				for (const value of values) {
 					const tagValue = sanitizeTagValue(value);
-					tags.add(`${config.tagPrefix || ""}${tagValue}`);
+					const tag = `${config.tagPrefix || ""}${tagValue}`;
+					tags.add(tag);
+					producedTags.add(tag);
 				}
 			} else if (config.syncType === "value" && config.valueMappings) {
 				const values = Array.isArray(propertyValue)
@@ -239,7 +246,10 @@ export default class FrontmatterSyncPlugin extends Plugin {
 						(m) => m.propertyValue === value
 					);
 					if (mapping) {
-						tags.add(sanitizeTagValue(mapping.tagValue));
+						const tag = sanitizeTagValue(mapping.tagValue);
+						tags.add(tag);
+						producedTags.add(tag);
+						mappedTags.add(tag);
 					}
 				}
 			} else if (config.syncType === "direct") {
@@ -258,13 +268,37 @@ export default class FrontmatterSyncPlugin extends Plugin {
 							value !== undefined &&
 							value !== ""
 						) {
-							tags.add(sanitizeTagValue(value));
+							const tag = sanitizeTagValue(value);
+							tags.add(tag);
+							producedTags.add(tag);
 						}
 					}
 				}
 				// Always update lastSyncedValue
 				config.lastSyncedValue = propertyValue;
 			}
+		}
+
+		// A mapped tag like "priority/high" owns its namespace "priority/": any other tag
+		// there (e.g. "priority/a" from an older mapping) is stale and gets replaced.
+		// Flat tags have no namespace, so they can't be reconciled this way.
+		const namespaces = new Set<string>();
+		for (const tag of mappedTags) {
+			const slash = tag.lastIndexOf("/");
+			if (slash > 0) namespaces.add(tag.slice(0, slash + 1));
+		}
+		if (namespaces.size > 0) {
+			tags = new Set(
+				Array.from(tags).filter(
+					(tag) =>
+						producedTags.has(tag) ||
+						!Array.from(namespaces).some(
+							(ns) =>
+								tag.startsWith(ns) &&
+								!tag.slice(ns.length).includes("/")
+						)
+				)
+			);
 		}
 
 		return tags.size > 0
