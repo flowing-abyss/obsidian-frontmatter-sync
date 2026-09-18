@@ -6,7 +6,6 @@ import {
 	Setting,
 	TFile,
 } from "obsidian";
-import { parse as parseYaml } from "yaml";
 
 interface ValueMapping {
 	propertyValue: string;
@@ -44,20 +43,46 @@ function sanitizeTagValue(value: any): string {
 		.join("/");
 }
 
+// Frontmatter tags as an array, whatever shape the user wrote them in
+function tagsOf(frontmatter: any): string[] {
+	const raw = frontmatter?.tags;
+	// Drop empty list items (a trailing "- " in hand-edited YAML parses as null)
+	if (Array.isArray(raw))
+		return raw
+			.filter((t) => t !== null && t !== undefined && t !== "")
+			.map(String);
+	if (typeof raw === "string" && raw) return [raw];
+	return [];
+}
+
+const SYNC_DELAY_MS = 2000;
+
 export default class FrontmatterSyncPlugin extends Plugin {
 	settings: FrontmatterSyncSettings;
-	private timeout: NodeJS.Timeout | null = null;
+	// One pending timer per note, so a burst touching several notes syncs each of them
+	private pending = new Map<TFile, number>();
+	private unloaded = false;
 
 	async onload() {
 		await this.loadSettings();
 
-		this.registerEvent(
-			this.app.vault.on("modify", (file: TFile) => {
-				if (file.extension === "md") {
-					this.debounceSyncFrontmatter(file);
-				}
-			})
-		);
+		// "changed" fires once the metadata cache has re-parsed the note — for edits from
+		// the editor, other plugins, and external tools alike. Subscribe only after the
+		// initial index so startup re-indexing never triggers writes on its own.
+		this.app.workspace.onLayoutReady(() => {
+			this.registerEvent(
+				this.app.metadataCache.on("changed", (file: TFile) => {
+					if (file.extension === "md") {
+						this.debounceSyncFrontmatter(file);
+					}
+				})
+			);
+		});
+		this.register(() => {
+			this.unloaded = true;
+			for (const timer of this.pending.values()) window.clearTimeout(timer);
+			this.pending.clear();
+		});
 
 		// Add command for bulk synchronization
 		this.addCommand({
@@ -82,57 +107,55 @@ export default class FrontmatterSyncPlugin extends Plugin {
 	}
 
 	debounceSyncFrontmatter(file: TFile) {
-		if (this.timeout) {
-			clearTimeout(this.timeout);
-		}
-		this.timeout = setTimeout(() => {
-			this.syncFrontmatter(file);
-		}, 2000);
+		const existing = this.pending.get(file);
+		if (existing !== undefined) window.clearTimeout(existing);
+		this.pending.set(
+			file,
+			window.setTimeout(() => {
+				this.pending.delete(file);
+				// The note may have been deleted while the timer was pending
+				if (this.app.vault.getAbstractFileByPath(file.path) !== file) return;
+				this.syncFrontmatter(file).catch((error) =>
+					console.error(`Error syncing ${file.path}:`, error)
+				);
+			}, SYNC_DELAY_MS)
+		);
 	}
 
-	async syncFrontmatter(file: TFile) {
-		const content = await this.app.vault.read(file);
-		const frontmatter = this.parseFrontmatter(content);
-
-		// Skip files without frontmatter or tags
-		if (!frontmatter || !frontmatter.tags) {
-			return;
-		}
-
-		// Check if file has any of the sync tags
-		const hasSyncTag = frontmatter.tags.some((tag: string) =>
+	/** True when the note's tags mark it for syncing */
+	private hasSyncTag(tags: string[]): boolean {
+		return tags.some((tag) =>
 			this.settings.syncTags.some((syncTag) => tag.startsWith(syncTag))
 		);
-
-		// Skip files without sync tags without making any changes
-		if (!hasSyncTag) {
-			return;
-		}
-
-		const updatedTags = this.synchronizeProperties(frontmatter);
-
-		const originalSet = new Set<string>(frontmatter.tags);
-		const tagsChanged =
-			originalSet.size !== updatedTags.length ||
-			updatedTags.some((tag) => !originalSet.has(tag));
-
-		if (tagsChanged) {
-			await this.app.fileManager.processFrontMatter(file, (fm) => {
-				fm.tags = updatedTags;
-			});
-		}
 	}
 
-	parseFrontmatter(content: string): any {
-		const fmMatch = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
-		if (fmMatch) {
-			try {
-				return parseYaml(fmMatch[1]);
-			} catch (e) {
-				return null;
-			}
+	/** Sync one note. Returns true when its tags were rewritten. */
+	async syncFrontmatter(file: TFile): Promise<boolean> {
+		// Cheap pre-check from the cache so untouched notes are never opened for writing
+		const cached = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		if (this.unloaded || !cached || !this.hasSyncTag(tagsOf(cached))) {
+			return false;
 		}
-		return null;
+
+		// Recompute from the frontmatter Obsidian hands us here — the latest on disk — so a
+		// write that landed after the pre-check (another plugin, the editor) is never
+		// overwritten with tags computed from a stale snapshot.
+		let changed = false;
+		await this.app.fileManager.processFrontMatter(file, (fm) => {
+			const currentTags = tagsOf(fm);
+			if (!this.hasSyncTag(currentTags)) return;
+			const updatedTags = this.synchronizeProperties({
+				...fm,
+				tags: currentTags,
+			});
+			const originalSet = new Set<string>(currentTags);
+			changed =
+				originalSet.size !== updatedTags.length ||
+				updatedTags.some((tag) => !originalSet.has(tag));
+			// Untouched frontmatter is not written back, so this stays a no-op on disk
+			if (changed) fm.tags = updatedTags;
+		});
+		return changed;
 	}
 
 	synchronizeProperties(frontmatter: any): string[] {
@@ -257,42 +280,16 @@ export default class FrontmatterSyncPlugin extends Plugin {
 
 			for (const file of markdownFiles) {
 				try {
-					const content = await this.app.vault.read(file);
-					const frontmatter = this.parseFrontmatter(content);
-
-					// Skip files without frontmatter or tags
-					if (!frontmatter || !frontmatter.tags) {
-						continue;
-					}
-
-					// Check if file has any of the sync tags
-					const hasSyncTag = frontmatter.tags.some((tag: string) =>
-						this.settings.syncTags.some((syncTag) =>
-							tag.startsWith(syncTag)
-						)
-					);
-
+					const cached =
+						this.app.metadataCache.getFileCache(file)?.frontmatter;
 					// Skip files without sync tags without making any changes
-					if (!hasSyncTag) {
+					if (!cached || !this.hasSyncTag(tagsOf(cached))) {
 						continue;
 					}
 
 					// Only process files that have sync tags
 					processedCount++;
-					const updatedTags = this.synchronizeProperties(frontmatter);
-
-					const originalSet = new Set<string>(frontmatter.tags);
-					const tagsChanged =
-						originalSet.size !== updatedTags.length ||
-						updatedTags.some((tag) => !originalSet.has(tag));
-
-					if (tagsChanged) {
-						await this.app.fileManager.processFrontMatter(
-							file,
-							(fm) => {
-								fm.tags = updatedTags;
-							}
-						);
+					if (await this.syncFrontmatter(file)) {
 						updatedCount++;
 					}
 				} catch (fileError) {
